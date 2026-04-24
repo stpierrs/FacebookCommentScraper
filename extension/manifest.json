@@ -1,0 +1,28 @@
+{"manifest_version": 3,
+  "name": "Facebook Comment Scraper",
+  "version": "1.0.0",
+  "description": "Download all Facebook comments and replies from a post into an Excel file",
+  "permissions": [
+    "scripting",
+    "activeTab",
+    "tabs",
+    "downloads"
+  ],
+  "host_permissions": [
+    "*://facebook.com/*",
+    "*://www.facebook.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Facebook Comment Scraper"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://facebook.com/*", "*://www.facebook.com/*"],
+      "js": ["content.js"]
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}
