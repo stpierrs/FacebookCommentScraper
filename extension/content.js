@@ -5,137 +5,227 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 async function scrapeAllComments() {
   try {
-    sendStatus('Expanding all comments and replies...', 'loading');
-    await expandAll();
-    sendStatus('Extracting comment data...', 'loading');
-    const data = extractComments();
-    console.log('Extracted data:', data);
+    sendStatus('Auto-expanding all comments, replies, and nested replies...', 'loading');
+    await autoExpandAll();
+    
+    sendStatus('Extracting all comment data...', 'loading');
+    const data = extractAllCommentData();
+    console.log('Total extracted:', data.length);
+    
     if (data.length === 0) {
-      sendStatus('No comments found. Scroll to the comments section first, then try again.', 'error');
+      sendStatus('No comments found. Scroll to comments section and try again.', 'error');
       return;
     }
-    sendStatus('Downloading CSV...', 'loading');
+    
+    sendStatus('Exporting CSV with ' + data.length + ' items...', 'loading');
     exportCSV(data);
     saveStats(data);
+    
     const comments = data.filter(d => d['Type'] === 'Comment').length;
-    const replies  = data.filter(d => d['Type'] === 'Reply').length;
-    sendStatus('COMPLETE - ' + comments + ' comments, ' + replies + ' replies exported', 'success', { comments, replies, progress: 100 });
+    const replies = data.filter(d => d['Type'] === 'Reply').length;
+    const nestedReplies = data.filter(d => d['Type'] === 'Nested Reply').length;
+    
+    sendStatus('COMPLETE - ' + comments + ' comments, ' + replies + ' replies, ' + nestedReplies + ' nested replies', 'success', { 
+      comments: comments + replies + nestedReplies, 
+      replies: 0, 
+      progress: 100 
+    });
   } catch (err) {
     console.error('Scraper error:', err);
     sendStatus('ERROR: ' + err.message, 'error');
   }
 }
 
-async function expandAll() {
-  let lastCount = 0, stableRounds = 0, pass = 0;
-  while (stableRounds < 4 && pass < 50) {
+async function autoExpandAll() {
+  let expandedCount = 0;
+  let lastExpandedCount = 0;
+  let stableRounds = 0;
+  let pass = 0;
+  
+  while (stableRounds < 6 && pass < 100) {
     pass++;
-    let clicked = 0;
+    expandedCount = 0;
+    
+    // Click all "View replies", "View more replies", "Previous comments", etc.
     const buttons = Array.from(document.querySelectorAll('[role="button"], button'));
-    console.log('Pass ' + pass + ': Found ' + buttons.length + ' buttons');
+    
     for (const btn of buttons) {
-      const t = (btn.innerText || '').toLowerCase().trim();
-      if (/view \d+ repl/i.test(t) || /^\d+ repl/i.test(t) || t.includes('view more repl') || t.includes('more repl') || t.includes('view more comment') || t.includes('more comment') || t.includes('previous comment') || t.includes('see more')) {
-        try { btn.click(); clicked++; await sleep(700); } catch(e) {}
+      const text = (btn.innerText || btn.textContent || '').toLowerCase().trim();
+      
+      // Match reply/comment expansion buttons
+      if (/view.*repl|repl.*comment|more.*repl|more.*comment|previous.*comment|see more|view more/i.test(text)) {
+        try {
+          btn.click();
+          expandedCount++;
+          await sleep(400);
+        } catch (e) {}
       }
     }
-    window.scrollBy(0, 900);
-    await sleep(1300);
-    const count = document.querySelectorAll('a[href*="comment_id="]').length;
-    console.log('Pass ' + pass + ': ' + count + ' comments found, clicked ' + clicked + ' buttons');
-    sendStatus('Loading... ' + count + ' items found', 'loading', { comments: count, replies: 0, progress: Math.min(80, pass * 2) });
-    if (count === lastCount && clicked === 0) stableRounds++;
-    else stableRounds = 0;
-    lastCount = count;
+    
+    // Scroll to reveal more content
+    window.scrollBy(0, 1200);
+    await sleep(1500);
+    
+    // Count visible comments to track progress
+    const commentCount = document.querySelectorAll('[data-testid="comment_box"]').length;
+    const progress = Math.min(85, pass * 2);
+    sendStatus('Pass ' + pass + ': Expanded ' + expandedCount + ' sections, ' + commentCount + ' comments visible', 'loading', { 
+      comments: commentCount, 
+      replies: 0, 
+      progress: progress 
+    });
+    
+    console.log('Pass ' + pass + ': Clicked ' + expandedCount + ' buttons');
+    
+    if (expandedCount === lastExpandedCount && expandedCount === 0) {
+      stableRounds++;
+    } else {
+      stableRounds = 0;
+    }
+    lastExpandedCount = expandedCount;
+    
+    await sleep(800);
   }
+  
+  console.log('Auto-expand complete after ' + pass + ' passes');
 }
 
-function extractComments() {
-  const results = [], seen = new Set();
-  const links = Array.from(document.querySelectorAll('a[href*="comment_id="]'));
-  console.log('Found ' + links.length + ' comment_id links');
-  for (const link of links) {
+function extractAllCommentData() {
+  const results = [];
+  const seenIds = new Set();
+  
+  // Get all comment boxes
+  const commentBoxes = document.querySelectorAll('[data-testid="comment_box"]');
+  console.log('Found ' + commentBoxes.length + ' comment boxes');
+  
+  let commentIndex = 0;
+  
+  for (const box of commentBoxes) {
     try {
-      const href = link.href || '';
-      if (!href.includes('comment_id=')) continue;
-      const isReply = href.includes('reply_comment_id=');
-      const commentIdMatch = href.match(/[?&]comment_id=(\d+)/);
-      const replyIdMatch   = href.match(/[?&]reply_comment_id=(\d+)/);
-      const commentId = replyIdMatch ? replyIdMatch[1] : (commentIdMatch ? commentIdMatch[1] : '');
-      const parentId  = isReply && commentIdMatch ? commentIdMatch[1] : '';
-      if (!commentId || seen.has(commentId)) continue;
-      seen.add(commentId);
-      const fullTimestamp     = link.getAttribute('aria-label') || '';
-      const relativeTimestamp = (link.innerText || '').trim();
-      const bubble = findCommentBubble(link);
-      if (!bubble) continue;
-      const text = getCommentText(bubble);
-      if (!text) continue;
-      const author = getAuthorName(bubble, link);
-      const likes  = getLikeCount(bubble);
-      results.push({
-        'Type': isReply ? 'Reply' : 'Comment',
-        'Author': author,
-        'Comment': text,
-        'Full Timestamp': fullTimestamp,
-        'Relative Time': relativeTimestamp,
-        'Likes': likes,
-        'Comment ID': commentId,
-        'Parent Comment ID': parentId
-      });
-    } catch (e) { console.error('Extract error:', e); }
+      const data = extractCommentFromBox(box, null);
+      if (data) {
+        if (!seenIds.has(data['ID'])) {
+          seenIds.add(data['ID']);
+          data['Type'] = 'Comment';
+          results.push(data);
+          commentIndex++;
+          
+          // Extract all replies to this comment
+          const replyBoxes = box.querySelectorAll('[data-testid="comment_box"]');
+          let replyIndex = 0;
+          
+          for (const replyBox of replyBoxes) {
+            if (replyBox === box) continue; // Skip the parent
+            
+            try {
+              const replyData = extractCommentFromBox(replyBox, data['ID']);
+              if (replyData && !seenIds.has(replyData['ID'])) {
+                seenIds.add(replyData['ID']);
+                
+                // Check if this is a nested reply
+                const nestedBoxes = replyBox.querySelectorAll('[data-testid="comment_box"]');
+                if (nestedBoxes.length > 0) {
+                  replyData['Type'] = 'Nested Reply';
+                  
+                  // Extract nested replies
+                  for (const nestedBox of nestedBoxes) {
+                    if (nestedBox === replyBox) continue;
+                    
+                    try {
+                      const nestedData = extractCommentFromBox(nestedBox, replyData['ID']);
+                      if (nestedData && !seenIds.has(nestedData['ID'])) {
+                        seenIds.add(nestedData['ID']);
+                        nestedData['Type'] = 'Nested Reply';
+                        nestedData['Parent ID'] = replyData['ID'];
+                        results.push(nestedData);
+                      }
+                    } catch (e) { console.error('Nested reply error:', e); }
+                  }
+                } else {
+                  replyData['Type'] = 'Reply';
+                }
+                
+                replyData['Parent ID'] = data['ID'];
+                results.push(replyData);
+                replyIndex++;
+              }
+            } catch (e) { console.error('Reply error:', e); }
+          }
+        }
+      }
+    } catch (e) { console.error('Comment error:', e); }
   }
-  console.log('Extracted ' + results.length + ' items total');
+  
+  console.log('Extracted ' + results.length + ' total items');
   return results;
 }
 
-function findCommentBubble(timestampLink) {
-  let el = timestampLink.parentElement;
-  for (let i = 0; i < 12; i++) {
-    if (!el) return null;
-    const dirAuto = el.querySelector('[dir="auto"]');
-    if (dirAuto && (dirAuto.innerText || '').trim().length > 2) {
-      const authorLink = el.querySelector('a[href*="facebook.com"], a[href^="/"]');
-      if (authorLink) return el;
+function extractCommentFromBox(box, parentId) {
+  try {
+    // Get unique ID from comment link
+    const commentLink = box.querySelector('a[href*="comment_id="]');
+    if (!commentLink) return null;
+    
+    const href = commentLink.href || '';
+    const idMatch = href.match(/comment_id=(\d+)/);
+    if (!idMatch) return null;
+    
+    const commentId = idMatch[1];
+    
+    // Get author name
+    const authorLink = box.querySelector('a[role="button"]');
+    const author = authorLink ? (authorLink.textContent || '').trim() : 'Unknown';
+    
+    // Get comment text - look for the largest text block
+    let commentText = '';
+    const textDivs = box.querySelectorAll('[dir="auto"]');
+    for (const div of textDivs) {
+      const text = (div.innerText || '').trim();
+      // Skip short text (likely metadata)
+      if (text.length > commentText.length && text.length > 5) {
+        commentText = text;
+      }
     }
-    el = el.parentElement;
+    
+    if (!commentText) {
+      // Fallback: get any remaining text
+      commentText = (box.innerText || '').substring(0, 500);
+    }
+    
+    // Get timestamp
+    const timeLink = box.querySelector('a[href*="comment_id="]');
+    const timestamp = timeLink ? (timeLink.getAttribute('aria-label') || '') : '';
+    const relativeTime = timeLink ? (timeLink.innerText || '') : '';
+    
+    // Get like count
+    let likes = '0';
+    const likeElements = box.querySelectorAll('[role="button"]');
+    for (const el of likeElements) {
+      const text = (el.textContent || '').trim();
+      if (/^\d+$/.test(text) && parseInt(text) > 0) {
+        likes = text;
+        break;
+      }
+    }
+    
+    // Clean up comment text - remove author name if included
+    if (commentText.startsWith(author)) {
+      commentText = commentText.substring(author.length).trim();
+    }
+    
+    return {
+      'ID': commentId,
+      'Author': author,
+      'Comment': commentText.substring(0, 10000), // Limit text length
+      'Timestamp': timestamp,
+      'Relative Time': relativeTime,
+      'Likes': likes,
+      'Parent ID': parentId || ''
+    };
+  } catch (e) {
+    console.error('Extract error:', e);
+    return null;
   }
-  return null;
-}
-
-function getCommentText(bubble) {
-  const testId = bubble.querySelector('[data-testid="comment.text"]');
-  if (testId) return (testId.innerText || '').trim();
-  const candidates = Array.from(bubble.querySelectorAll('[dir="auto"]'));
-  let best = '';
-  for (const el of candidates) {
-    if (el.querySelector('[role="button"]')) continue;
-    const text = (el.innerText || '').trim();
-    if (text.length > best.length) best = text;
-  }
-  return best;
-}
-
-function getAuthorName(bubble, timestampLink) {
-  const testId = bubble.querySelector('[data-testid="comment.author"]');
-  if (testId) return (testId.innerText || '').trim();
-  const links = Array.from(bubble.querySelectorAll('a[href*="facebook.com"], a[href^="/"]'));
-  for (const a of links) {
-    if (a === timestampLink) continue;
-    if ((a.href || '').includes('comment_id=')) continue;
-    const text = (a.innerText || '').trim();
-    if (text.length > 1 && !/^\d+[smhd]$/.test(text)) return text;
-  }
-  return 'Unknown';
-}
-
-function getLikeCount(bubble) {
-  const sels = ['[aria-label*="reaction"]','[aria-label*="like"]','[data-testid*="reaction"]','[data-testid*="like"]'];
-  for (const sel of sels) {
-    const el = bubble.querySelector(sel);
-    if (el) { const m = (el.innerText || el.getAttribute('aria-label') || '').match(/\d+/); if (m) return m[0]; }
-  }
-  return '0';
 }
 
 function exportCSV(data) {
@@ -143,37 +233,61 @@ function exportCSV(data) {
     console.error('No data to export');
     return;
   }
-  const headers = Object.keys(data[0]);
+  
+  const headers = ['Type', 'Author', 'Comment', 'Timestamp', 'Relative Time', 'Likes', 'ID', 'Parent ID'];
   const rows = [headers.join(',')];
+  
   for (const row of data) {
-    rows.push(headers.map(h => '"' + String(row[h] || '').replace(/"/g, '""').replace(/\r?\n/g, ' ') + '"').join(','));
+    const values = [
+      row['Type'] || '',
+      '"' + (row['Author'] || '').replace(/"/g, '""') + '"',
+      '"' + (row['Comment'] || '').replace(/"/g, '""').replace(/\r?\n/g, ' ') + '"',
+      '"' + (row['Timestamp'] || '').replace(/"/g, '""') + '"',
+      '"' + (row['Relative Time'] || '').replace(/"/g, '""') + '"',
+      row['Likes'] || '0',
+      row['ID'] || '',
+      row['Parent ID'] || ''
+    ];
+    rows.push(values.join(','));
   }
+  
   const csv = '\uFEFF' + rows.join('\r\n');
-  console.log('CSV content length:', csv.length);
-  console.log('CSV preview:', csv.substring(0, 200));
+  console.log('CSV rows: ' + rows.length + ', size: ' + csv.length + ' bytes');
+  
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  console.log('Blob size:', blob.size);
   const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'fb_comments_' + Date.now() + '.csv';
-  a.style.display = 'none';
-  document.body.appendChild(a);
-  console.log('Triggering download:', a.download);
-  a.click();
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'facebook_comments_' + Date.now() + '.csv';
+  link.style.display = 'none';
+  
+  document.body.appendChild(link);
+  console.log('Downloading: ' + link.download);
+  link.click();
+  
   setTimeout(() => {
-    document.body.removeChild(a);
+    document.body.removeChild(link);
     URL.revokeObjectURL(url);
   }, 100);
 }
 
 function saveStats(data) {
-  chrome.storage.local.set({ stats: { comments: data.filter(d=>d['Type']==='Comment').length, replies: data.filter(d=>d['Type']==='Reply').length, progress: 100, timestamp: new Date().toISOString() } });
+  const comments = data.filter(d => d['Type'] === 'Comment').length;
+  const replies = data.filter(d => d['Type'] === 'Reply').length;
+  const nested = data.filter(d => d['Type'] === 'Nested Reply').length;
+  chrome.storage.local.set({ 
+    stats: { 
+      comments: comments + replies + nested,
+      replies: 0, 
+      progress: 100, 
+      timestamp: new Date().toISOString() 
+    } 
+  });
 }
 
 function sendStatus(message, type, stats) {
-  console.log('sendStatus:', message, type, stats);
-  chrome.runtime.sendMessage({ action: 'updateStatus', message, type, stats: stats || {} }).catch((e) => { console.error('Message send failed:', e); });
+  console.log('Status:', message);
+  chrome.runtime.sendMessage({ action: 'updateStatus', message, type, stats: stats || {} }).catch((e) => { console.error('Message error:', e); });
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
