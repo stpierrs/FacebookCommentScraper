@@ -1,248 +1,179 @@
-// Content script that runs on Facebook pages
-
-let allComments = [];
-let isScrolling = false;
-
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === 'startScraping') {
-    sendResponse({ status: 'started' });
-    scrapeCommentsAndReplies();
-  }
+  if (request.action === 'startScraping') { sendResponse({ status: 'started' }); scrapeAllComments(); }
+  if (request.action === 'ping') { sendResponse({ status: 'alive' }); }
 });
 
-async function scrapeCommentsAndReplies() {
+async function scrapeAllComments() {
   try {
-    updateProgress('🔍 Finding comments section...', 'loading');
-    
-    // Scroll to load all comments
-    await scrollAndLoadAllComments();
-    
-    updateProgress('📊 Extracting comment data...', 'loading');
-    
-    // Extract all comments and replies
-    const commentsData = extractAllComments();
-    
-    updateProgress('💾 Generating Excel file...', 'loading');
-    
-    // Generate and download Excel file
-    await generateAndDownloadExcel(commentsData);
-    
-    updateProgress('✅ Comments downloaded successfully!', 'success');
-  } catch (error) {
-    console.error('Scraping error:', error);
-    updateProgress('❌ Error: ' + error.message, 'error');
+    sendStatus('Expanding all comments and replies...', 'loading');
+    await expandAll();
+    sendStatus('Extracting comment data...', 'loading');
+    const data = extractComments();
+    console.log('Extracted data:', data);
+    if (data.length === 0) {
+      sendStatus('No comments found. Scroll to the comments section first, then try again.', 'error');
+      return;
+    }
+    sendStatus('Downloading CSV...', 'loading');
+    exportCSV(data);
+    saveStats(data);
+    const comments = data.filter(d => d['Type'] === 'Comment').length;
+    const replies  = data.filter(d => d['Type'] === 'Reply').length;
+    sendStatus('COMPLETE - ' + comments + ' comments, ' + replies + ' replies exported', 'success', { comments, replies, progress: 100 });
+  } catch (err) {
+    console.error('Scraper error:', err);
+    sendStatus('ERROR: ' + err.message, 'error');
   }
 }
 
-async function scrollAndLoadAllComments() {
-  let lastHeight = document.body.scrollHeight;
-  let noNewCommentsCount = 0;
-  const maxNoNewCount = 5;
-  let commentCount = 0;
-  let replyCount = 0;
-
-  while (noNewCommentsCount < maxNoNewCount) {
-    // Scroll down
-    window.scrollTo(0, document.body.scrollHeight);
-    
-    // Wait for new content to load
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    
-    // Check for "View more" buttons and click them
-    const viewMoreButtons = document.querySelectorAll(
-      '[aria-label*="View more"], [role="button"][aria-expanded="false"]'
-    );
-    
-    for (let btn of viewMoreButtons) {
-      if (btn.textContent.toLowerCase().includes('more')) {
-        try {
-          btn.click();
-          await new Promise(resolve => setTimeout(resolve, 500));
-        } catch (e) {
-          // Button might not be clickable
-        }
+async function expandAll() {
+  let lastCount = 0, stableRounds = 0, pass = 0;
+  while (stableRounds < 4 && pass < 50) {
+    pass++;
+    let clicked = 0;
+    const buttons = Array.from(document.querySelectorAll('[role="button"], button'));
+    console.log('Pass ' + pass + ': Found ' + buttons.length + ' buttons');
+    for (const btn of buttons) {
+      const t = (btn.innerText || '').toLowerCase().trim();
+      if (/view \d+ repl/i.test(t) || /^\d+ repl/i.test(t) || t.includes('view more repl') || t.includes('more repl') || t.includes('view more comment') || t.includes('more comment') || t.includes('previous comment') || t.includes('see more')) {
+        try { btn.click(); clicked++; await sleep(700); } catch(e) {}
       }
     }
-    
-    // Count current comments
-    const currentCommentCount = document.querySelectorAll(
-      '[data-testid="post-comment"], .x1o934m2, .xu06os2'
-    ).length;
-    
-    const newHeight = document.body.scrollHeight;
-    
-    if (newHeight === lastHeight) {
-      noNewCommentsCount++;
-    } else {
-      noNewCommentsCount = 0;
-    }
-    
-    lastHeight = newHeight;
-    
-    // Update progress
-    const progressPercent = Math.min(100, noNewCommentsCount * 20);
-    updateProgress(
-      `📄 Loading comments... (${currentCommentCount} comments found)`,
-      'loading',
-      { comments: currentCommentCount, replies: 0, progress: progressPercent }
-    );
+    window.scrollBy(0, 900);
+    await sleep(1300);
+    const count = document.querySelectorAll('a[href*="comment_id="]').length;
+    console.log('Pass ' + pass + ': ' + count + ' comments found, clicked ' + clicked + ' buttons');
+    sendStatus('Loading... ' + count + ' items found', 'loading', { comments: count, replies: 0, progress: Math.min(80, pass * 2) });
+    if (count === lastCount && clicked === 0) stableRounds++;
+    else stableRounds = 0;
+    lastCount = count;
   }
 }
 
-function extractAllComments() {
-  const comments = [];
-  const commentElements = document.querySelectorAll(
-    '[data-testid="post-comment"], .x1o934m2'
-  );
-
-  commentElements.forEach((elem, index) => {
+function extractComments() {
+  const results = [], seen = new Set();
+  const links = Array.from(document.querySelectorAll('a[href*="comment_id="]'));
+  console.log('Found ' + links.length + ' comment_id links');
+  for (const link of links) {
     try {
-      // Get commenter name
-      const nameElem = elem.querySelector(
-        'a[role="button"] > div > div:first-child, [data-testid="comment.author"]'
-      );
-      const name = nameElem?.textContent?.trim() || 'Unknown';
-
-      // Get comment text
-      const textElem = elem.querySelector(
-        '[data-testid="comment.text"], [role="article"] > div > div > div:last-child'
-      );
-      const text = textElem?.textContent?.trim() || '';
-
-      // Get timestamp
-      const timeElem = elem.querySelector('abbr, [data-utime]');
-      const timestamp = timeElem?.textContent?.trim() || timeElem?.getAttribute('aria-label') || '';
-
-      // Get like count
-      const likeElem = elem.querySelector('[data-testid="UFI2ReactionsCount"]');
-      const likes = likeElem?.textContent?.trim() || '0';
-
-      // Get replies
-      const replies = [];
-      const replySection = elem.querySelector('[data-testid="comment_replies_container"]');
-      
-      if (replySection) {
-        const replyElements = replySection.querySelectorAll('[data-testid="post-comment"]');
-        replyElements.forEach(replyElem => {
-          try {
-            const replyName = replyElem.querySelector('a[role="button"] > div')?.textContent?.trim() || 'Unknown';
-            const replyText = replyElem.querySelector('[data-testid="comment.text"]')?.textContent?.trim() || '';
-            const replyTime = replyElem.querySelector('abbr')?.textContent?.trim() || '';
-            const replyLikes = replyElem.querySelector('[data-testid="UFI2ReactionsCount"]')?.textContent?.trim() || '0';
-
-            if (replyText) {
-              replies.push({
-                name: replyName,
-                text: replyText,
-                timestamp: replyTime,
-                likes: replyLikes
-              });
-            }
-          } catch (e) {
-            // Skip malformed replies
-          }
-        });
-      }
-
-      if (text) {
-        comments.push({
-          type: 'Comment',
-          name,
-          text,
-          timestamp,
-          likes,
-          replies: replies.length
-        });
-
-        // Add replies as individual rows
-        replies.forEach(reply => {
-          comments.push({
-            type: 'Reply',
-            name: reply.name,
-            text: reply.text,
-            timestamp: reply.timestamp,
-            likes: reply.likes,
-            replies: 0
-          });
-        });
-      }
-    } catch (e) {
-      console.error('Error extracting comment:', e);
-    }
-  });
-
-  return comments;
-}
-
-async function generateAndDownloadExcel(commentsData) {
-  // Check if XLSX library is available, if not use CSV fallback
-  const csvContent = generateCSV(commentsData);
-  
-  // Try to use XLSX if available
-  if (typeof XLSX !== 'undefined') {
-    const workbook = XLSX.utils.book_new();
-    const worksheet = XLSX.utils.json_to_sheet(commentsData);
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Comments');
-    
-    const fileName = `facebook_comments_${new Date().getTime()}.xlsx`;
-    XLSX.writeFile(workbook, fileName);
-  } else {
-    // Fallback to CSV download
-    downloadCSV(csvContent);
+      const href = link.href || '';
+      if (!href.includes('comment_id=')) continue;
+      const isReply = href.includes('reply_comment_id=');
+      const commentIdMatch = href.match(/[?&]comment_id=(\d+)/);
+      const replyIdMatch   = href.match(/[?&]reply_comment_id=(\d+)/);
+      const commentId = replyIdMatch ? replyIdMatch[1] : (commentIdMatch ? commentIdMatch[1] : '');
+      const parentId  = isReply && commentIdMatch ? commentIdMatch[1] : '';
+      if (!commentId || seen.has(commentId)) continue;
+      seen.add(commentId);
+      const fullTimestamp     = link.getAttribute('aria-label') || '';
+      const relativeTimestamp = (link.innerText || '').trim();
+      const bubble = findCommentBubble(link);
+      if (!bubble) continue;
+      const text = getCommentText(bubble);
+      if (!text) continue;
+      const author = getAuthorName(bubble, link);
+      const likes  = getLikeCount(bubble);
+      results.push({
+        'Type': isReply ? 'Reply' : 'Comment',
+        'Author': author,
+        'Comment': text,
+        'Full Timestamp': fullTimestamp,
+        'Relative Time': relativeTimestamp,
+        'Likes': likes,
+        'Comment ID': commentId,
+        'Parent Comment ID': parentId
+      });
+    } catch (e) { console.error('Extract error:', e); }
   }
-  
-  // Save to storage for reference
-  chrome.storage.local.set({
-    scrapedData: commentsData,
-    stats: {
-      comments: commentsData.filter(c => c.type === 'Comment').length,
-      replies: commentsData.filter(c => c.type === 'Reply').length,
-      progress: 100,
-      timestamp: new Date().toISOString()
+  console.log('Extracted ' + results.length + ' items total');
+  return results;
+}
+
+function findCommentBubble(timestampLink) {
+  let el = timestampLink.parentElement;
+  for (let i = 0; i < 12; i++) {
+    if (!el) return null;
+    const dirAuto = el.querySelector('[dir="auto"]');
+    if (dirAuto && (dirAuto.innerText || '').trim().length > 2) {
+      const authorLink = el.querySelector('a[href*="facebook.com"], a[href^="/"]');
+      if (authorLink) return el;
     }
-  });
+    el = el.parentElement;
+  }
+  return null;
 }
 
-function generateCSV(data) {
-  const headers = ['Type', 'Author', 'Comment', 'Timestamp', 'Likes', 'Reply Count'];
-  const rows = [headers.map(h => `"${h}"`).join(',')];
-
-  data.forEach(item => {
-    const row = [
-      item.type,
-      `"${item.name.replace(/"/g, '""')}"`,
-      `"${item.text.replace(/"/g, '""')}"`,
-      item.timestamp,
-      item.likes,
-      item.replies
-    ];
-    rows.push(row.join(','));
-  });
-
-  return rows.join('\n');
+function getCommentText(bubble) {
+  const testId = bubble.querySelector('[data-testid="comment.text"]');
+  if (testId) return (testId.innerText || '').trim();
+  const candidates = Array.from(bubble.querySelectorAll('[dir="auto"]'));
+  let best = '';
+  for (const el of candidates) {
+    if (el.querySelector('[role="button"]')) continue;
+    const text = (el.innerText || '').trim();
+    if (text.length > best.length) best = text;
+  }
+  return best;
 }
 
-function downloadCSV(csvContent) {
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-  const link = document.createElement('a');
+function getAuthorName(bubble, timestampLink) {
+  const testId = bubble.querySelector('[data-testid="comment.author"]');
+  if (testId) return (testId.innerText || '').trim();
+  const links = Array.from(bubble.querySelectorAll('a[href*="facebook.com"], a[href^="/"]'));
+  for (const a of links) {
+    if (a === timestampLink) continue;
+    if ((a.href || '').includes('comment_id=')) continue;
+    const text = (a.innerText || '').trim();
+    if (text.length > 1 && !/^\d+[smhd]$/.test(text)) return text;
+  }
+  return 'Unknown';
+}
+
+function getLikeCount(bubble) {
+  const sels = ['[aria-label*="reaction"]','[aria-label*="like"]','[data-testid*="reaction"]','[data-testid*="like"]'];
+  for (const sel of sels) {
+    const el = bubble.querySelector(sel);
+    if (el) { const m = (el.innerText || el.getAttribute('aria-label') || '').match(/\d+/); if (m) return m[0]; }
+  }
+  return '0';
+}
+
+function exportCSV(data) {
+  if (!data.length) {
+    console.error('No data to export');
+    return;
+  }
+  const headers = Object.keys(data[0]);
+  const rows = [headers.join(',')];
+  for (const row of data) {
+    rows.push(headers.map(h => '"' + String(row[h] || '').replace(/"/g, '""').replace(/\r?\n/g, ' ') + '"').join(','));
+  }
+  const csv = '\uFEFF' + rows.join('\r\n');
+  console.log('CSV content length:', csv.length);
+  console.log('CSV preview:', csv.substring(0, 200));
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  console.log('Blob size:', blob.size);
   const url = URL.createObjectURL(blob);
-  
-  link.setAttribute('href', url);
-  link.setAttribute('download', `facebook_comments_${new Date().getTime()}.csv`);
-  link.style.visibility = 'hidden';
-  
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'fb_comments_' + Date.now() + '.csv';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  console.log('Triggering download:', a.download);
+  a.click();
+  setTimeout(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 100);
 }
 
-function updateProgress(message, type, stats = {}) {
-  chrome.runtime.sendMessage({
-    action: 'updateStatus',
-    message,
-    type,
-    stats: stats || {}
-  }).catch(() => {
-    // Popup might be closed, ignore error
-  });
+function saveStats(data) {
+  chrome.storage.local.set({ stats: { comments: data.filter(d=>d['Type']==='Comment').length, replies: data.filter(d=>d['Type']==='Reply').length, progress: 100, timestamp: new Date().toISOString() } });
 }
+
+function sendStatus(message, type, stats) {
+  console.log('sendStatus:', message, type, stats);
+  chrome.runtime.sendMessage({ action: 'updateStatus', message, type, stats: stats || {} }).catch((e) => { console.error('Message send failed:', e); });
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
