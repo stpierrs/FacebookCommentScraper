@@ -67,17 +67,17 @@
     }
 
     #startBtn {
-      border-color: #00f0ff;
-      color: #00f0ff;
-      text-shadow: 0 0 8px #00f0ff;
+      border-color: #00ff00;
+      color: #00ff00;
+      text-shadow: 0 0 8px #00ff00;
     }
     #startBtn:hover:not(:disabled) {
-      background: #00f0ff18;
-      box-shadow: 0 0 18px #00f0ff50, inset 0 0 18px #00f0ff10;
+      background: #00ff0018;
+      box-shadow: 0 0 18px #00ff0050, inset 0 0 18px #00ff0010;
     }
     #startBtn:disabled {
-      border-color: #00f0ff25;
-      color: #00f0ff25;
+      border-color: #00ff0025;
+      color: #00ff0025;
       cursor: not-allowed;
       text-shadow: none;
     }
@@ -106,6 +106,7 @@
       background: #00f0ff08;
       color: #8ee3e3;
     }
+    #status.idle { border-color: #00f0ff; color: #00f0ff; }
     #status.loading { border-color: #ffcc00; background: #ffcc0008; color: #ffcc00; animation: pulse 2s infinite; }
     #status.success { border-color: #00ff88; background: #00ff8808; color: #00ff88; }
     #status.error   { border-color: #ff4444; background: #ff444408; color: #ff4444; }
@@ -145,15 +146,15 @@
     <h1>Comment Scraper</h1>
   </div>
 
-  <button class="btn" id="startBtn">▶ &nbsp;Initialize Scrape</button>
+  <button class="btn" id="startBtn">▶ &nbsp;Run Now</button>
   <button class="btn" id="clearBtn">✕ &nbsp;Clear Data</button>
 
   <div id="status" class="idle">SYSTEM READY — AWAITING INPUT</div>
 
   <div class="stats-panel">
     <div class="stats-label">Scan Results</div>
-    <div class="stat-row"><span>Comments</span><span class="stat-value" id="commentCount">0</span></div>
-    <div class="stat-row"><span>Replies</span><span class="stat-value" id="replyCount">0</span></div>
+    <div class="stat-row"><span>Total Items</span><span class="stat-value" id="commentCount">0</span></div>
+    <div class="stat-row"><span>Last Run</span><span class="stat-value" id="replyCount">Never</span></div>
     <div class="stat-row"><span>Progress</span><span class="stat-value" id="progress">0%</span></div>
   </div>
 
